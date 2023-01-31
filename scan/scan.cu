@@ -29,6 +29,88 @@ static inline int nextPow2(int n)
     return n;
 }
 
+const int num_print = 64; // DEBUGGING
+void print_host_data(int *data, int size, int num_print)
+{
+    // Prints data on host
+    num_print = (num_print > size) ? size : num_print;
+    std::cout << "host data: ";
+    for(int i = 0; i < num_print; i++){
+        std::cout << data[i] << ", ";
+    }
+    if(num_print < size)
+        std::cout << "...";
+    std::cout << "\n";
+}
+
+void print_device_data(int *device_data, int size, int num_print)
+{
+    // Prints data on device
+    num_print = (num_print > size) ? size : num_print;
+    int* inarray = new int[num_print];
+    cudaMemcpy(inarray, device_data, num_print*sizeof(int), cudaMemcpyDeviceToHost);
+    std::cout << "dev  data: ";
+    for(int i = 0; i < num_print; i++){
+        std::cout << inarray[i] << ", ";
+    }
+    if(num_print < size)
+        std::cout << "...";
+    std::cout << "\n";
+}
+
+void exclusive_scan_iterative(int* data, int length)
+{
+    int N = length;
+    // upsweep phase.
+    std::cout << "Before upsweep: ";
+    print_host_data(data, length, num_print);
+    for (int twod = 1; twod < N; twod*=2)
+    {
+        int twod1 = twod*2;
+        for(int i = 0; i < N; i += twod1)
+            data[i+twod1-1] += data[i+twod-1];
+    }
+    std::cout << "After upsweep: ";
+    print_host_data(data, length, num_print);
+    data[N-1] = 0;
+    // downsweep phase.
+    for (int twod = N/2; twod >= 1; twod /= 2)
+    {
+        int twod1 = twod*2;
+        for(int i = 0; i < N; i += twod1)
+        {
+            int t = data[i+twod-1];
+            data[i+twod-1] = data[i+twod1-1];
+            // change twod1 below to twod to reverse prefix sum.
+            data[i+twod1-1] += t;
+        }
+    }
+    std::cout << "After downsweep: ";
+    print_host_data(data, length, num_print);
+    std::cout << "\n";
+}
+
+__global__ void upsweep_kernel(int *device_data, int N, int twod)
+{
+    int twod1 = twod*2;
+    int index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
+    if (index < N)
+        device_data[index+twod1-1] += device_data[index+twod-1];
+}
+
+__global__ void downsweep_kernel(int *device_data, int N, int twod)
+{
+    int twod1 = twod*2;
+    int index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
+    if(index < N)
+    {
+        int t = device_data[index+twod-1];
+        device_data[index+twod-1] = device_data[index+twod1-1];
+        // change twod1 below to twod to reverse prefix sum.
+        device_data[index+twod1-1] += t;
+    }
+}
+
 void exclusive_scan(int* device_data, int length)
 {
     /* TODO
@@ -43,6 +125,46 @@ void exclusive_scan(int* device_data, int length)
      * both the data array is sized to accommodate the next
      * power of 2 larger than the input.
      */
+    
+    int N = length;
+    const int threadsPerBlock = 512;
+    const int blocks = (N + threadsPerBlock - 1) / threadsPerBlock;
+    // Clear unsued memory
+    int rounded_length = nextPow2(length);
+    // upsweep phase.
+    {
+        // DEBUGGING
+        std::cout << "Before upsweep:  ";
+        print_device_data(device_data, rounded_length, num_print); 
+    }
+    for (int twod = 1; twod < N; twod*=2)
+    {
+        upsweep_kernel<<<blocks, threadsPerBlock>>>(device_data, N, twod);
+    }
+    {
+        // DEBUGGING
+        std::cout << "After upsweep:   ";
+        print_device_data(device_data, rounded_length, num_print);
+    }
+    cudaMemset(device_data+N-1, 0, (rounded_length-length+1)*sizeof(int));
+    {
+        // DEBUGGING
+        std::cout << "After zeroing:   ";
+        print_device_data(device_data, rounded_length, num_print);
+    }
+
+    // downsweep phase.
+    for (int twod = N/2; twod >= 1; twod /= 2)
+    {
+        downsweep_kernel<<<blocks, threadsPerBlock>>>(device_data, N, twod);
+    }
+    {
+        // DEBUGGING
+        std::cout << "After downsweep: ";
+        print_device_data(device_data, rounded_length, num_print);
+        std::cout << "\n";
+    }
+
 }
 
 /* This function is a wrapper around the code you will write - it copies the
@@ -51,6 +173,14 @@ void exclusive_scan(int* device_data, int length)
  */
 double cudaScan(int* inarray, int* end, int* resultarray)
 {
+    // {
+    //     // DEBUGGING
+    //     int length = end-inarray;
+    //     int* test_array = new int[length];
+    //     memcpy(test_array, inarray, length * sizeof(int));
+    //     exclusive_scan_iterative(test_array, length);
+    // }
+
     int* device_data;
     // We round the array size up to a power of 2, but elements after
     // the end of the original input are left uninitialized and not checked
