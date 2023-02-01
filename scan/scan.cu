@@ -93,15 +93,15 @@ void exclusive_scan_iterative(int* data, int length)
 __global__ void upsweep_kernel(int *device_data, int N, int twod)
 {
     int twod1 = twod*2;
-    int index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
-    if (index < N)
+    long index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
+    if ((index+twod1-1) < N)
         device_data[index+twod1-1] += device_data[index+twod-1];
 }
 
 __global__ void downsweep_kernel(int *device_data, int N, int twod)
 {
     int twod1 = twod*2;
-    int index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
+    long index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
     if(index < N)
     {
         int t = device_data[index+twod-1];
@@ -125,17 +125,19 @@ void exclusive_scan(int* device_data, int length)
      * both the data array is sized to accommodate the next
      * power of 2 larger than the input.
      */
-    
-    int N = length;
+    const int N = nextPow2(length);
     const int threadsPerBlock = 512;
     const int blocks = (N + threadsPerBlock - 1) / threadsPerBlock;
-    // Clear unsued memory
-    int rounded_length = nextPow2(length);
+    printf("threads = %d, blocks = %d, prod = %d\n", threadsPerBlock, blocks, threadsPerBlock*blocks);
+    uint index = (threadsPerBlock * blocks) * 8192*2;
+    printf("index = %u\n", index);
+    printf("Sizeof(uint) = %d\n", sizeof(uint));
+    printf("Sizeof(long) = %d\n", sizeof(long));
     // upsweep phase.
     {
         // DEBUGGING
         std::cout << "Before upsweep:  ";
-        print_device_data(device_data, rounded_length, num_print); 
+        print_device_data(device_data, N, num_print); 
     }
     for (int twod = 1; twod < N; twod*=2)
     {
@@ -144,13 +146,14 @@ void exclusive_scan(int* device_data, int length)
     {
         // DEBUGGING
         std::cout << "After upsweep:   ";
-        print_device_data(device_data, rounded_length, num_print);
+        print_device_data(device_data, N, num_print);
     }
-    cudaMemset(device_data+N-1, 0, (rounded_length-length+1)*sizeof(int));
+    // Zero unused memory
+    cudaMemset(device_data+length-1, 0, (N-length+1)*sizeof(int));
     {
         // DEBUGGING
         std::cout << "After zeroing:   ";
-        print_device_data(device_data, rounded_length, num_print);
+        print_device_data(device_data, N, num_print);
     }
 
     // downsweep phase.
@@ -161,7 +164,7 @@ void exclusive_scan(int* device_data, int length)
     {
         // DEBUGGING
         std::cout << "After downsweep: ";
-        print_device_data(device_data, rounded_length, num_print);
+        print_device_data(device_data, N, num_print);
         std::cout << "\n";
     }
 
