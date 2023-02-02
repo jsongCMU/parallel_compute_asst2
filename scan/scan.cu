@@ -29,7 +29,7 @@ static inline int nextPow2(int n)
     return n;
 }
 
-const int num_print = 64; // DEBUGGING
+const int num_print = 128; // DEBUGGING
 void print_host_data(int *data, int size, int num_print)
 {
     // Prints data on host
@@ -46,16 +46,36 @@ void print_host_data(int *data, int size, int num_print)
 void print_device_data(int *device_data, int size, int num_print)
 {
     // Prints data on device
-    num_print = (num_print > size) ? size : num_print;
-    int* inarray = new int[num_print];
-    cudaMemcpy(inarray, device_data, num_print*sizeof(int), cudaMemcpyDeviceToHost);
-    std::cout << "dev  data: ";
-    for(int i = 0; i < num_print; i++){
-        std::cout << inarray[i] << ", ";
+    // print_device_data(device_data+N-num_print, num_print, num_print);
+    if(num_print > size){
+      // Print whole thing
+      int* inarray = new int[size];
+      cudaMemcpy(inarray, device_data, size*sizeof(int), cudaMemcpyDeviceToHost);
+      std::cout << "(device) ";
+      for(int i = 0; i < num_print; i++){
+          std::cout << inarray[i] << ", ";
+      }
+      std::cout << "\n";
     }
-    if(num_print < size)
-        std::cout << "...";
-    std::cout << "\n";
+    else
+    {
+      // Print first and last data
+      int num_print1 = num_print/2;
+      int num_print2 = num_print - num_print1;
+      int* inarray1 = new int[num_print1];
+      int* inarray2 = new int[num_print2];
+      cudaMemcpy(inarray1, device_data, num_print1*sizeof(int), cudaMemcpyDeviceToHost);
+      cudaMemcpy(inarray2, device_data+size-num_print2, num_print2*sizeof(int), cudaMemcpyDeviceToHost);
+      std::cout << "(device) ";
+      for(int i = 0; i < num_print1; i++){
+          std::cout << inarray1[i] << ", ";
+      }
+      std::cout << "...\n... ";
+      for(int i = 0; i < num_print2; i++){
+          std::cout << inarray2[i] << ", ";
+      }
+      std::cout << "\n";
+    }
 }
 
 void exclusive_scan_iterative(int* data, int length)
@@ -93,7 +113,7 @@ void exclusive_scan_iterative(int* data, int length)
 __global__ void upsweep_kernel(int *device_data, int N, int twod)
 {
     int twod1 = twod*2;
-    long index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
+    long index = (blockIdx.x * blockDim.x + threadIdx.x) * (long)twod1;
     if ((index+twod1-1) < N)
         device_data[index+twod1-1] += device_data[index+twod-1];
 }
@@ -101,8 +121,8 @@ __global__ void upsweep_kernel(int *device_data, int N, int twod)
 __global__ void downsweep_kernel(int *device_data, int N, int twod)
 {
     int twod1 = twod*2;
-    long index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
-    if(index < N)
+    long index = (blockIdx.x * blockDim.x + threadIdx.x) * (long)twod1;
+    if((index+twod1-1) < N)
     {
         int t = device_data[index+twod-1];
         device_data[index+twod-1] = device_data[index+twod1-1];
@@ -128,45 +148,58 @@ void exclusive_scan(int* device_data, int length)
     const int N = nextPow2(length);
     const int threadsPerBlock = 512;
     const int blocks = (N + threadsPerBlock - 1) / threadsPerBlock;
-    printf("threads = %d, blocks = %d, prod = %d\n", threadsPerBlock, blocks, threadsPerBlock*blocks);
-    uint index = (threadsPerBlock * blocks) * 8192*2;
-    printf("index = %u\n", index);
-    printf("Sizeof(uint) = %d\n", sizeof(uint));
-    printf("Sizeof(long) = %d\n", sizeof(long));
+    // {
+    //   // DEBUGGING
+    //   printf("threads = %d, blocks = %d, prod = %d\n", threadsPerBlock, blocks, threadsPerBlock*blocks);
+    //   long max_index = (threadsPerBlock*blocks-1)*65536*2;
+    //   std::cout << "Max index  = " << max_index << "\n";
+    //   printf("Sizeof(long) = %ld\n", sizeof(long long));
+    // }
     // upsweep phase.
-    {
-        // DEBUGGING
-        std::cout << "Before upsweep:  ";
-        print_device_data(device_data, N, num_print); 
-    }
+    // {
+    //     // DEBUGGING
+    //     cudaMemset(device_data+length, 0, (N-length)*sizeof(int));
+    //     std::cout << "\tBefore upsweep: ";
+    //     print_device_data(device_data, N, num_print); 
+    // }
     for (int twod = 1; twod < N; twod*=2)
     {
         upsweep_kernel<<<blocks, threadsPerBlock>>>(device_data, N, twod);
+        // {
+        //     // DEBUGGING
+        //     printf("\tDuring upsweep (twod = %d): ", twod);
+        //     print_device_data(device_data, N, num_print);
+        // }
     }
-    {
-        // DEBUGGING
-        std::cout << "After upsweep:   ";
-        print_device_data(device_data, N, num_print);
-    }
+    // {
+    //     // DEBUGGING
+    //     std::cout << "\tAfter upsweep: ";
+    //     print_device_data(device_data, N, num_print);
+    // }
     // Zero unused memory
     cudaMemset(device_data+length-1, 0, (N-length+1)*sizeof(int));
-    {
-        // DEBUGGING
-        std::cout << "After zeroing:   ";
-        print_device_data(device_data, N, num_print);
-    }
+    // {
+    //     // DEBUGGING
+    //     std::cout << "\tAfter zeroing: ";
+    //     print_device_data(device_data, N, num_print);
+    // }
 
     // downsweep phase.
     for (int twod = N/2; twod >= 1; twod /= 2)
     {
         downsweep_kernel<<<blocks, threadsPerBlock>>>(device_data, N, twod);
+        // {
+        //     // DEBUGGING
+        //     printf("\tDuring downsweep (twod = %d): ", twod);
+        //     print_device_data(device_data, N, num_print);
+        // }
     }
-    {
-        // DEBUGGING
-        std::cout << "After downsweep: ";
-        print_device_data(device_data, N, num_print);
-        std::cout << "\n";
-    }
+    // {
+    //     // DEBUGGING
+    //     std::cout << "\tAfter downsweep: ";
+    //     print_device_data(device_data, N, num_print);
+    //     std::cout << "\n";
+    // }
 
 }
 
