@@ -278,49 +278,17 @@ int find_peaks(int *device_input, int length, int *device_output) {
     int *is_peaks;
     cudaMalloc((void **)&is_peaks, sizeof(int) * length);
     get_peaks<<<blocks, THREADS_PER_BLOCK>>>(device_input, length, is_peaks);
-    {
-        // DEBUGGING
-        std::cout << "Input:\n\t";
-        print_device_data(device_input, length, num_print);
-        std::cout << "Is_peaks:\n\t";
-        print_device_data(is_peaks, length, num_print);
-    }
-
     // Get indexes
     int *target_idxs;
-    // 0,1,0,1,0,0,1,0 -> 
-    // 0,0,1,1,2,2,2,3
     const int N = nextPow2(length);
     cudaMalloc((void **)&target_idxs, sizeof(int) * N);
     cudaMemcpy(target_idxs, is_peaks, sizeof(int) * length, cudaMemcpyDeviceToDevice);
-    {
-        // DEBUGGING
-        std::cout << "target_idxs, before sum:\n\t";
-        print_device_data(target_idxs, length, num_print);
-    }
     exclusive_scan(target_idxs, length);
-    {
-        // DEBUGGING
-        std::cout << "target_idxs, after sum:\n\t";
-        print_device_data(target_idxs, length, num_print);
-    }
-    
     // Write to output
     write_output<<<blocks, THREADS_PER_BLOCK>>>(is_peaks, target_idxs, device_output, length);
-    {
-        // DEBUGGING
-        std::cout << "output:\n\t";
-        print_device_data(device_output, length, num_print);
-    }
-
     // Get size
     int size;
     cudaMemcpy(&size, target_idxs+length-1, sizeof(int), cudaMemcpyDeviceToHost);
-    {
-        // DEBUGGING
-        std::cout << "Size = " << size << "\n\n";
-    }
-
     return size;
 }
 
