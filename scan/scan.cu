@@ -11,6 +11,7 @@
 
 #include "CycleTimer.h"
 
+const int THREADS_PER_BLOCK = 64;
 
 extern float toBW(int bytes, float sec);
 
@@ -52,7 +53,7 @@ void print_device_data(int *device_data, int size, int num_print)
       int* inarray = new int[size];
       cudaMemcpy(inarray, device_data, size*sizeof(int), cudaMemcpyDeviceToHost);
       std::cout << "(device) ";
-      for(int i = 0; i < num_print; i++){
+      for(int i = 0; i < size; i++){
           std::cout << inarray[i] << ", ";
       }
       std::cout << "\n";
@@ -146,12 +147,11 @@ void exclusive_scan(int* device_data, int length)
      * power of 2 larger than the input.
      */
     const int N = nextPow2(length);
-    const int threadsPerBlock = 512;
-    const int blocks = (N + threadsPerBlock - 1) / threadsPerBlock;
+    const int blocks = (N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     // upsweep phase.
     for (int twod = 1; twod < N; twod*=2)
     {
-        upsweep_kernel<<<blocks, threadsPerBlock>>>(device_data, N, twod);
+        upsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(device_data, N, twod);
     }
     // Zero unused memory
     cudaMemset(device_data+length-1, 0, (N-length+1)*sizeof(int));
@@ -159,7 +159,7 @@ void exclusive_scan(int* device_data, int length)
     // downsweep phase.
     for (int twod = N/2; twod >= 1; twod /= 2)
     {
-        downsweep_kernel<<<blocks, threadsPerBlock>>>(device_data, N, twod);
+        downsweep_kernel<<<blocks, THREADS_PER_BLOCK>>>(device_data, N, twod);
     }
 
 }
@@ -235,7 +235,27 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
+__global__ void get_peaks(int* device_data, int length, int* device_output)
+{
+  // Determines if value is peak (1 if true else 0)
+    long index = blockIdx.x * blockDim.x + threadIdx.x;
+    if(index > 0 && index < length-1)
+        device_output[index] = 
+            (device_data[index] > device_data[index-1]) ? 
+                ((device_data[index] > device_data[index+1]) ?
+                    1 :
+                    0) : (0);
+    else if(index == 0 || index < length)
+        device_output[index] = 0;
+}
 
+__global__ void write_output(int *is_peaks, int *idxs, int *outputs, int length)
+{
+  // Determines if value is peak (1 if true else 0)
+    long index = blockIdx.x * blockDim.x + threadIdx.x;
+    if(index < length && is_peaks[index])
+        outputs[idxs[index]] = index;
+}
 
 int find_peaks(int *device_input, int length, int *device_output) {
     /* TODO:
@@ -252,10 +272,57 @@ int find_peaks(int *device_input, int length, int *device_output) {
      * it requires that. However, you must ensure that the results of
      * find_peaks are correct given the original length.
      */
-    return 0;
+    const int blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    
+    // Get peaks
+    int *is_peaks;
+    cudaMalloc((void **)&is_peaks, sizeof(int) * length);
+    get_peaks<<<blocks, THREADS_PER_BLOCK>>>(device_input, length, is_peaks);
+    {
+        // DEBUGGING
+        std::cout << "Input:\n\t";
+        print_device_data(device_input, length, num_print);
+        std::cout << "Is_peaks:\n\t";
+        print_device_data(is_peaks, length, num_print);
+    }
+
+    // Get indexes
+    int *target_idxs;
+    // 0,1,0,1,0,0,1,0 -> 
+    // 0,0,1,1,2,2,2,3
+    const int N = nextPow2(length);
+    cudaMalloc((void **)&target_idxs, sizeof(int) * N);
+    cudaMemcpy(target_idxs, is_peaks, sizeof(int) * length, cudaMemcpyDeviceToDevice);
+    {
+        // DEBUGGING
+        std::cout << "target_idxs, before sum:\n\t";
+        print_device_data(target_idxs, length, num_print);
+    }
+    exclusive_scan(target_idxs, length);
+    {
+        // DEBUGGING
+        std::cout << "target_idxs, after sum:\n\t";
+        print_device_data(target_idxs, length, num_print);
+    }
+    
+    // Write to output
+    write_output<<<blocks, THREADS_PER_BLOCK>>>(is_peaks, target_idxs, device_output, length);
+    {
+        // DEBUGGING
+        std::cout << "output:\n\t";
+        print_device_data(device_output, length, num_print);
+    }
+
+    // Get size
+    int size;
+    cudaMemcpy(&size, target_idxs+length-1, sizeof(int), cudaMemcpyDeviceToHost);
+    {
+        // DEBUGGING
+        std::cout << "Size = " << size << "\n\n";
+    }
+
+    return size;
 }
-
-
 
 /* Timing wrapper around find_peaks. You should not modify this function.
  */
