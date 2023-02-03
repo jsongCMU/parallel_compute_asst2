@@ -235,18 +235,27 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
-__global__ void get_peaks(int* device_data, int length, int* device_output)
+__global__ void get_peaks(int* device_data, int length, int* indx_matrix, int* flag_matrix)
 {
   // Determines if value is peak (1 if true else 0)
-    long index = blockIdx.x * blockDim.x + threadIdx.x;
+    const long index = blockIdx.x * blockDim.x + threadIdx.x;
+    const int flag = 
+        (device_data[index] > device_data[index-1]) ? 
+            ((device_data[index] > device_data[index+1]) ?
+                1 :
+                0) :
+            (0);
     if(index > 0 && index < length-1)
-        device_output[index] = 
-            (device_data[index] > device_data[index-1]) ? 
-                ((device_data[index] > device_data[index+1]) ?
-                    1 :
-                    0) : (0);
+    {
+        indx_matrix[index] = flag*index;
+        flag_matrix[index] = flag;
+    }
     else if(index == 0 || index < length)
-        device_output[index] = 0;
+    {
+      indx_matrix[index] = 0;
+      flag_matrix[index] = 0;
+    }
+    // cudaMemcpy(target_idxs, is_peaks, sizeof(int) * length, cudaMemcpyDeviceToDevice);
 }
 
 __global__ void write_output(int *is_peaks, int *idxs, int *outputs, int length)
@@ -275,20 +284,18 @@ int find_peaks(int *device_input, int length, int *device_output) {
     const int blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     
     // Get peaks
-    int *is_peaks;
-    cudaMalloc((void **)&is_peaks, sizeof(int) * length);
-    get_peaks<<<blocks, THREADS_PER_BLOCK>>>(device_input, length, is_peaks);
-    // Get indexes
-    int *target_idxs;
     const int N = nextPow2(length);
-    cudaMalloc((void **)&target_idxs, sizeof(int) * N);
-    cudaMemcpy(target_idxs, is_peaks, sizeof(int) * length, cudaMemcpyDeviceToDevice);
-    exclusive_scan(target_idxs, length);
+    int *peak_idxs, *output_idxs;
+    cudaMalloc((void **)&peak_idxs, sizeof(int) * (length+N));
+    output_idxs = peak_idxs + length;
+    get_peaks<<<blocks, THREADS_PER_BLOCK>>>(device_input, length, peak_idxs, output_idxs);
+    // Get indexes
+    exclusive_scan(output_idxs, length);
     // Write to output
-    write_output<<<blocks, THREADS_PER_BLOCK>>>(is_peaks, target_idxs, device_output, length);
+    write_output<<<blocks, THREADS_PER_BLOCK>>>(peak_idxs, output_idxs, device_output, length);
     // Get size
     int size;
-    cudaMemcpy(&size, target_idxs+length-1, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&size, output_idxs+length-1, sizeof(int), cudaMemcpyDeviceToHost);
     return size;
 }
 
