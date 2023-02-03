@@ -123,9 +123,9 @@ __global__ void downsweep_kernel(int *device_data, int N, int twod)
 {
     int twod1 = twod*2;
     long index = (blockIdx.x * blockDim.x + threadIdx.x) * (long)twod1;
+    int t = device_data[index+twod-1];
     if((index+twod1-1) < N)
     {
-        int t = device_data[index+twod-1];
         device_data[index+twod-1] = device_data[index+twod1-1];
         // change twod1 below to twod to reverse prefix sum.
         device_data[index+twod1-1] += t;
@@ -255,7 +255,6 @@ __global__ void get_peaks(int* device_data, int length, int* indx_matrix, int* f
       indx_matrix[index] = 0;
       flag_matrix[index] = 0;
     }
-    // cudaMemcpy(target_idxs, is_peaks, sizeof(int) * length, cudaMemcpyDeviceToDevice);
 }
 
 __global__ void write_output(int *is_peaks, int *idxs, int *outputs, int length)
