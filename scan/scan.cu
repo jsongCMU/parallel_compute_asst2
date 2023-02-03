@@ -11,7 +11,8 @@
 
 #include "CycleTimer.h"
 
-const int THREADS_PER_BLOCK = 64;
+const int THREADS_PER_BLOCK = 512;
+const int num_print = 128; // DEBUGGING
 
 extern float toBW(int bytes, float sec);
 
@@ -30,7 +31,6 @@ static inline int nextPow2(int n)
     return n;
 }
 
-const int num_print = 128; // DEBUGGING
 void print_host_data(int *data, int size, int num_print)
 {
     // Prints data on host
