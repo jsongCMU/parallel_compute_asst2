@@ -22,6 +22,10 @@
 // All cuda kernels here
 ///////////////////////////////////////////////////////////////////////////////////////
 
+// Divide screen into segments
+#define SCREEN_X_SEGMENTS (10)
+#define SCREEN_Y_SEGMENTS (10)
+
 // This stores the global constants
 struct GlobalConstants {
 
@@ -37,6 +41,7 @@ struct GlobalConstants {
     int imageWidth;
     int imageHeight;
     float* imageData;
+    int* circleSegmentMatrix;
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -433,6 +438,50 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+// For each circle, determine if it impacts segment
+__global__ void kernelCircleInSegment() {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= cuConstRendererParams.numberOfCircles)
+        return;
+    int index3 = 3 * index;
+
+    // Read circle properties
+    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+    float  rad = cuConstRendererParams.radius[index];
+
+    // Compute if circle touches each segment
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+    short segmentWidth = imageWidth / SCREEN_X_SEGMENTS;
+    short segmentHeight = imageHeight / SCREEN_Y_SEGMENTS;
+    short circleMinX = static_cast<short>(imageWidth * (p.x - rad));
+    short circleMaxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
+    short circleMinY = static_cast<short>(imageHeight * (p.y - rad));
+    short circleMaxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
+    for(int i = 0; i < SCREEN_Y_SEGMENTS; i++){
+        short segmentMinY = i*segmentHeight;
+        short segmentMaxY = (i+1)*segmentHeight-1;
+        for(int j = 0; j < SCREEN_X_SEGMENTS; j++){
+            short segmentMinX = j*segmentWidth;
+            short segmentMaxX = (j+1)*segmentWidth-1;
+            // Test isn't exhaustive; if circle is enormous and doesn't touch section at center or edges, then not detected
+            bool inX1 = ((circleMinX > segmentMinX) && (circleMinX < segmentMaxX)) || ((circleMaxX > segmentMinX) && (circleMaxX < segmentMaxX));
+            bool inY1 = ((circleMinY > segmentMinY) && (circleMinY < segmentMaxY)) || ((circleMaxY > segmentMinY) && (circleMaxY < segmentMaxY));
+            bool inX2 = ((segmentMinX > circleMinX) && (segmentMinX < circleMaxX)) || ((segmentMaxX > circleMinX) && (segmentMaxX < circleMaxX));
+            bool inY2 = ((segmentMinY > circleMinY) && (segmentMinY < circleMaxY)) || ((segmentMaxY > circleMinY) && (segmentMaxY < circleMaxY));
+            // printf("(%d,%d) = [%d,%d] to [%d,%d]\n", i, j, segmentMinY, segmentMinX, segmentMaxY, segmentMaxX);
+            // printf("(%d,%d) = [%d,%d] to [%d,%d]\n", i, j, circleMinX, circleMinY, circleMaxX, circleMaxY);
+            if((inX1 && inY1) || (inX2 && inY2))
+            {
+                cuConstRendererParams.circleSegmentMatrix[cuConstRendererParams.numberOfCircles*(i*SCREEN_X_SEGMENTS+j)+index] = 1;
+                // printf("Segment [%d][%d] impacted by circle %d\n", i,j,index);
+            }
+            else
+                cuConstRendererParams.circleSegmentMatrix[cuConstRendererParams.numberOfCircles*(i*SCREEN_X_SEGMENTS+j)+index] = 0;
+        }
+    }
+    
+}
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -471,6 +520,7 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(cudaDeviceColor);
         cudaFree(cudaDeviceRadius);
         cudaFree(cudaDeviceImageData);
+        cudaFree(cudaCircleImpactsSegment);
     }
 }
 
@@ -549,6 +599,8 @@ CudaRenderer::setup() {
     cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numberOfCircles, cudaMemcpyHostToDevice);
     cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numberOfCircles, cudaMemcpyHostToDevice);
 
+    cudaMalloc(&cudaCircleImpactsSegment, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * numberOfCircles);
+
     // Initialize parameters in constant memory.  We didn't talk about
     // constant memory in class, but the use of read-only constant
     // memory here is an optimization over just sticking these values
@@ -567,6 +619,7 @@ CudaRenderer::setup() {
     params.color = cudaDeviceColor;
     params.radius = cudaDeviceRadius;
     params.imageData = cudaDeviceImageData;
+    params.circleSegmentMatrix = cudaCircleImpactsSegment;
 
     cudaMemcpyToSymbol(cuConstRendererParams, &params, sizeof(GlobalConstants));
 
@@ -653,10 +706,17 @@ CudaRenderer::advanceAnimation() {
 
 void
 CudaRenderer::render() {
-    // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numberOfCircles + blockDim.x - 1) / blockDim.x);
-
-    kernelRenderCircles<<<gridDim, blockDim>>>();
-    cudaDeviceSynchronize();
+    // Determine which circles impact which segments
+    {
+        dim3 blockDim(256, 1);
+        dim3 gridDim((numberOfCircles + blockDim.x - 1) / blockDim.x);
+        kernelCircleInSegment<<<gridDim, blockDim>>>();
+    }
+    // Use kernelCircleInSegment for blending
+    {
+        dim3 blockDim(256, 1);
+        dim3 gridDim((numberOfCircles + blockDim.x - 1) / blockDim.x);
+        kernelRenderCircles<<<gridDim, blockDim>>>();
+        cudaDeviceSynchronize();
+    }
 }
