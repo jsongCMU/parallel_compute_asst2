@@ -25,6 +25,8 @@
 // Divide screen into segments
 #define SCREEN_X_SEGMENTS (10)
 #define SCREEN_Y_SEGMENTS (10)
+// Divide circles into batches
+#define CIRCLE_BATCH_SIZE (100)
 
 // This stores the global constants
 struct GlobalConstants {
@@ -390,6 +392,59 @@ shadePixel(float2 pixelCenter, float3 p, float4* imagePtr, int circleIndex) {
     // END SHOULD-BE-ATOMIC REGION
 }
 
+__global__ void kernelRenderPixel(int N, int batch_idx, int batch_size) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+
+    if (index < N)
+    {
+        // Compute coordinate of pixel
+        int pixelX = index % imageHeight;
+        int pixelY = floorf(index / imageWidth);
+        // Determine which segment it falls into
+        int seg_x_num = pixelX * SCREEN_X_SEGMENTS / imageWidth;
+        int seg_y_num = pixelY * SCREEN_Y_SEGMENTS / imageHeight;
+        // Iterate through circles that matter
+        float4 color = *(float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+        for (int i = 0; i < batch_size; i++)
+        {
+            if(cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(seg_y_num*SCREEN_X_SEGMENTS+seg_x_num)+i] == 0){
+                continue;
+            }
+            int global_index = i + batch_idx * CIRCLE_BATCH_SIZE;
+            int index3 = 3 * global_index;
+
+            // Read position and radius
+            float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+            float rad = cuConstRendererParams.radius[global_index];
+
+            // Compute the bounding box of the circle. The bound is in integer
+            // screen coordinates, so it's clamped to the edges of the screen.
+            short minX = static_cast<short>(imageWidth * (p.x - rad));
+            short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
+            short minY = static_cast<short>(imageHeight * (p.y - rad));
+            short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
+
+            float invWidth = 1.f / imageWidth;
+            float invHeight = 1.f / imageHeight;
+
+            // Check inside bbox
+            if (minX <= pixelX && pixelX <= maxX && minY <= pixelY && pixelY <= maxY)
+            {
+                float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
+                shadePixel(pixelCenterNorm, p, &color, global_index);
+            }
+        }
+
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)] = color.x;
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 1] = color.y;
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 2] = color.z;
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 3] = color.w;
+    }
+}
+
 // kernelRenderCircles -- (CUDA device code)
 //
 // Each thread renders a circle.  Since there is no protection to
@@ -438,16 +493,17 @@ __global__ void kernelRenderCircles() {
     }
 }
 
-// For each circle, determine if it impacts segment
-__global__ void kernelCircleInSegment() {
+// For each circle in batch, determine if it impacts segment
+__global__ void kernelCircleInSegment(int batch_idx, int batch_size) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= cuConstRendererParams.numberOfCircles)
+    if (index >= batch_size)
         return;
-    int index3 = 3 * index;
+    int global_index = index + batch_idx * CIRCLE_BATCH_SIZE;
+    int index3 = 3 * global_index;
 
     // Read circle properties
     float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-    float  rad = cuConstRendererParams.radius[index];
+    float  rad = cuConstRendererParams.radius[global_index];
 
     // Compute if circle touches each segment
     short imageWidth = cuConstRendererParams.imageWidth;
@@ -464,20 +520,17 @@ __global__ void kernelCircleInSegment() {
         for(int j = 0; j < SCREEN_X_SEGMENTS; j++){
             short segmentMinX = j*segmentWidth;
             short segmentMaxX = (j+1)*segmentWidth-1;
-            // Test isn't exhaustive; if circle is enormous and doesn't touch section at center or edges, then not detected
             bool inX1 = ((circleMinX > segmentMinX) && (circleMinX < segmentMaxX)) || ((circleMaxX > segmentMinX) && (circleMaxX < segmentMaxX));
             bool inY1 = ((circleMinY > segmentMinY) && (circleMinY < segmentMaxY)) || ((circleMaxY > segmentMinY) && (circleMaxY < segmentMaxY));
             bool inX2 = ((segmentMinX > circleMinX) && (segmentMinX < circleMaxX)) || ((segmentMaxX > circleMinX) && (segmentMaxX < circleMaxX));
             bool inY2 = ((segmentMinY > circleMinY) && (segmentMinY < circleMaxY)) || ((segmentMaxY > circleMinY) && (segmentMaxY < circleMaxY));
-            // printf("(%d,%d) = [%d,%d] to [%d,%d]\n", i, j, segmentMinY, segmentMinX, segmentMaxY, segmentMaxX);
-            // printf("(%d,%d) = [%d,%d] to [%d,%d]\n", i, j, circleMinX, circleMinY, circleMaxX, circleMaxY);
             if((inX1 && inY1) || (inX2 && inY2))
             {
-                cuConstRendererParams.circleSegmentMatrix[cuConstRendererParams.numberOfCircles*(i*SCREEN_X_SEGMENTS+j)+index] = 1;
-                // printf("Segment [%d][%d] impacted by circle %d\n", i,j,index);
+                cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index] = 1;
+                // printf("Addr %d set to 1\n", CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index);
             }
             else
-                cuConstRendererParams.circleSegmentMatrix[cuConstRendererParams.numberOfCircles*(i*SCREEN_X_SEGMENTS+j)+index] = 0;
+                cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index] = 0;
         }
     }
     
@@ -599,7 +652,16 @@ CudaRenderer::setup() {
     cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numberOfCircles, cudaMemcpyHostToDevice);
     cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numberOfCircles, cudaMemcpyHostToDevice);
 
-    cudaMalloc(&cudaCircleImpactsSegment, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * numberOfCircles);
+    cudaError_t mallocErr = cudaMalloc(&cudaCircleImpactsSegment, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE);
+    printf("numCircles: %d\n", numberOfCircles);
+    if(mallocErr == cudaSuccess)
+    {
+        printf("SUCC: malloc has succeeded\n\n\n");
+    }
+    else
+    {
+        printf("ERROR: malloc has failed\n\n\n");
+    }
 
     // Initialize parameters in constant memory.  We didn't talk about
     // constant memory in class, but the use of read-only constant
@@ -706,17 +768,24 @@ CudaRenderer::advanceAnimation() {
 
 void
 CudaRenderer::render() {
-    // Determine which circles impact which segments
+    // Compute circles in batches
+    int num_batches = (numberOfCircles+CIRCLE_BATCH_SIZE-1)/CIRCLE_BATCH_SIZE;
+    for(int batch_idx = 0; batch_idx < num_batches; batch_idx++)
     {
-        dim3 blockDim(256, 1);
-        dim3 gridDim((numberOfCircles + blockDim.x - 1) / blockDim.x);
-        kernelCircleInSegment<<<gridDim, blockDim>>>();
-    }
-    // Use kernelCircleInSegment for blending
-    {
-        dim3 blockDim(256, 1);
-        dim3 gridDim((numberOfCircles + blockDim.x - 1) / blockDim.x);
-        kernelRenderCircles<<<gridDim, blockDim>>>();
+        int batch_size = (CIRCLE_BATCH_SIZE*(batch_idx+1) > numberOfCircles) ? (numberOfCircles - CIRCLE_BATCH_SIZE*batch_idx) : CIRCLE_BATCH_SIZE;
+        // Determine which circles impact which segments
+        {
+            dim3 blockDim(256, 1);
+            dim3 gridDim((CIRCLE_BATCH_SIZE + blockDim.x - 1) / blockDim.x);
+            kernelCircleInSegment<<<gridDim, blockDim>>>(batch_idx, batch_size);
+        }
+        cudaDeviceSynchronize();
+        // Render
+        {
+            int threadsPerBlock = 512;
+            int blocks = (image->width * image->height + threadsPerBlock - 1) / threadsPerBlock;
+            kernelRenderPixel<<<blocks, threadsPerBlock>>>(image->width * image->height, batch_idx, batch_size);
+        }
         cudaDeviceSynchronize();
     }
 }
