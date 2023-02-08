@@ -23,10 +23,10 @@
 ///////////////////////////////////////////////////////////////////////////////////////
 
 // Divide screen into segments
-#define SCREEN_X_SEGMENTS (10)
-#define SCREEN_Y_SEGMENTS (10)
+#define SCREEN_X_SEGMENTS (5)
+#define SCREEN_Y_SEGMENTS (SCREEN_X_SEGMENTS)
 // Divide circles into batches
-#define CIRCLE_BATCH_SIZE (100)
+#define CIRCLE_BATCH_SIZE (1024)
 
 // This stores the global constants
 struct GlobalConstants {
