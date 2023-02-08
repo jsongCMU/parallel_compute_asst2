@@ -493,6 +493,28 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+__device__ __inline__ int
+circleInBox(
+    float circleX, float circleY, float circleRadius,
+    float boxL, float boxR, float boxT, float boxB)
+{
+
+    // clamp circle center to box (finds the closest point on the box)
+    float closestX = (circleX > boxL) ? ((circleX < boxR) ? circleX : boxR) : boxL;
+    float closestY = (circleY > boxB) ? ((circleY < boxT) ? circleY : boxT) : boxB;
+
+    // is circle radius less than the distance to the closest point on
+    // the box?
+    float distX = closestX - circleX;
+    float distY = closestY - circleY;
+
+    if ( ((distX*distX) + (distY*distY)) <= (circleRadius*circleRadius) ) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
 // For each circle in batch, determine if it impacts segment
 __global__ void kernelCircleInSegment(int batch_idx, int batch_size) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -502,35 +524,23 @@ __global__ void kernelCircleInSegment(int batch_idx, int batch_size) {
     int index3 = 3 * global_index;
 
     // Read circle properties
-    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-    float  rad = cuConstRendererParams.radius[global_index];
-
-    // Compute if circle touches each segment
     short imageWidth = cuConstRendererParams.imageWidth;
     short imageHeight = cuConstRendererParams.imageHeight;
+    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+    p.x *= imageWidth; p.y *= imageHeight;
+    float  rad = cuConstRendererParams.radius[global_index]*imageWidth+1;
+
+    // Compute if circle touches each segment
     short segmentWidth = imageWidth / SCREEN_X_SEGMENTS;
     short segmentHeight = imageHeight / SCREEN_Y_SEGMENTS;
-    short circleMinX = static_cast<short>(imageWidth * (p.x - rad));
-    short circleMaxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
-    short circleMinY = static_cast<short>(imageHeight * (p.y - rad));
-    short circleMaxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
     for(int i = 0; i < SCREEN_Y_SEGMENTS; i++){
         short segmentMinY = i*segmentHeight;
         short segmentMaxY = (i+1)*segmentHeight-1;
         for(int j = 0; j < SCREEN_X_SEGMENTS; j++){
             short segmentMinX = j*segmentWidth;
             short segmentMaxX = (j+1)*segmentWidth-1;
-            bool inX1 = ((circleMinX >= segmentMinX) && (circleMinX <= segmentMaxX)) || ((circleMaxX >= segmentMinX) && (circleMaxX <= segmentMaxX));
-            bool inY1 = ((circleMinY >= segmentMinY) && (circleMinY <= segmentMaxY)) || ((circleMaxY >= segmentMinY) && (circleMaxY <= segmentMaxY));
-            bool inX2 = ((segmentMinX >= circleMinX) && (segmentMinX <= circleMaxX)) || ((segmentMaxX >= circleMinX) && (segmentMaxX <= circleMaxX));
-            bool inY2 = ((segmentMinY >= circleMinY) && (segmentMinY <= circleMaxY)) || ((segmentMaxY >= circleMinY) && (segmentMaxY <= circleMaxY));
-            if((inX1 && inY1) || (inX2 && inY2))
-            {
-                cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index] = 1;
-                // printf("Addr %d set to 1\n", CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index);
-            }
-            else
-                cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index] = 0;
+            cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index] = 
+                circleInBox(p.x, p.y, rad, segmentMinX, segmentMaxX, segmentMaxY, segmentMinY);
         }
     }
     
@@ -780,10 +790,12 @@ CudaRenderer::render() {
             kernelCircleInSegment<<<gridDim, blockDim>>>(batch_idx, batch_size);
         }
         cudaDeviceSynchronize();
+        // TODO: Compress array using scan
         // Render
         {
             int threadsPerBlock = 512;
             int blocks = (image->width * image->height + threadsPerBlock - 1) / threadsPerBlock;
+            // TODO: Change blending math
             kernelRenderPixel<<<blocks, threadsPerBlock>>>(image->width * image->height, batch_idx, batch_size);
         }
         cudaDeviceSynchronize();
