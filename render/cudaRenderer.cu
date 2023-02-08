@@ -23,7 +23,7 @@
 ///////////////////////////////////////////////////////////////////////////////////////
 
 // Divide screen into segments
-#define SCREEN_X_SEGMENTS (5)
+#define SCREEN_X_SEGMENTS (10)
 #define SCREEN_Y_SEGMENTS (SCREEN_X_SEGMENTS)
 // Divide circles into batches
 #define CIRCLE_BATCH_SIZE (1024)
@@ -520,10 +520,10 @@ __global__ void kernelCircleInSegment(int batch_idx, int batch_size) {
         for(int j = 0; j < SCREEN_X_SEGMENTS; j++){
             short segmentMinX = j*segmentWidth;
             short segmentMaxX = (j+1)*segmentWidth-1;
-            bool inX1 = ((circleMinX > segmentMinX) && (circleMinX < segmentMaxX)) || ((circleMaxX > segmentMinX) && (circleMaxX < segmentMaxX));
-            bool inY1 = ((circleMinY > segmentMinY) && (circleMinY < segmentMaxY)) || ((circleMaxY > segmentMinY) && (circleMaxY < segmentMaxY));
-            bool inX2 = ((segmentMinX > circleMinX) && (segmentMinX < circleMaxX)) || ((segmentMaxX > circleMinX) && (segmentMaxX < circleMaxX));
-            bool inY2 = ((segmentMinY > circleMinY) && (segmentMinY < circleMaxY)) || ((segmentMaxY > circleMinY) && (segmentMaxY < circleMaxY));
+            bool inX1 = ((circleMinX >= segmentMinX) && (circleMinX <= segmentMaxX)) || ((circleMaxX >= segmentMinX) && (circleMaxX <= segmentMaxX));
+            bool inY1 = ((circleMinY >= segmentMinY) && (circleMinY <= segmentMaxY)) || ((circleMaxY >= segmentMinY) && (circleMaxY <= segmentMaxY));
+            bool inX2 = ((segmentMinX >= circleMinX) && (segmentMinX <= circleMaxX)) || ((segmentMaxX >= circleMinX) && (segmentMaxX <= circleMaxX));
+            bool inY2 = ((segmentMinY >= circleMinY) && (segmentMinY <= circleMaxY)) || ((segmentMaxY >= circleMinY) && (segmentMaxY <= circleMaxY));
             if((inX1 && inY1) || (inX2 && inY2))
             {
                 cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(i*SCREEN_X_SEGMENTS+j)+index] = 1;
