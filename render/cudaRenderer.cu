@@ -17,6 +17,8 @@
 #include "sceneLoader.h"
 #include "util.h"
 
+#include <thrust/scan.h>
+#include <thrust/device_ptr.h>
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // All cuda kernels here
@@ -26,7 +28,7 @@
 #define SCREEN_X_SEGMENTS (10)
 #define SCREEN_Y_SEGMENTS (SCREEN_X_SEGMENTS)
 // Divide circles into batches
-#define CIRCLE_BATCH_SIZE (1024)
+#define CIRCLE_BATCH_SIZE (32)
 
 // This stores the global constants
 struct GlobalConstants {
@@ -545,6 +547,18 @@ __global__ void kernelCircleInSegment(int batch_idx, int batch_size) {
     }
     
 }
+
+// Given CircleSegmentMatrix and scan, compress into cudaRelCircles
+__global__ void kernelIndexCompress(int* circle_seg_matrix, int* scan_res, int* relevant_circles, int batch_size) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= batch_size)
+        return;
+    if(circle_seg_matrix[index]){
+        relevant_circles[scan_res[index]] = index;
+    }
+    
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -562,6 +576,8 @@ CudaRenderer::CudaRenderer() {
     cudaDeviceColor = NULL;
     cudaDeviceRadius = NULL;
     cudaDeviceImageData = NULL;
+    cudaScanResult = NULL;
+    cudaRelCircles = NULL;
 }
 
 CudaRenderer::~CudaRenderer() {
@@ -584,6 +600,8 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(cudaDeviceRadius);
         cudaFree(cudaDeviceImageData);
         cudaFree(cudaCircleImpactsSegment);
+        cudaFree(cudaScanResult);
+        cudaFree(cudaRelCircles);
     }
 }
 
@@ -662,15 +680,17 @@ CudaRenderer::setup() {
     cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numberOfCircles, cudaMemcpyHostToDevice);
     cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numberOfCircles, cudaMemcpyHostToDevice);
 
-    cudaError_t mallocErr = cudaMalloc(&cudaCircleImpactsSegment, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE);
+    cudaError_t mallocErr1 = cudaMalloc(&cudaCircleImpactsSegment, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE);
     printf("numCircles: %d\n", numberOfCircles);
-    if(mallocErr == cudaSuccess)
+    cudaError_t mallocErr2 = cudaMalloc(&cudaScanResult, sizeof(int) * CIRCLE_BATCH_SIZE);
+    cudaError_t mallocErr3 = cudaMalloc(&cudaRelCircles, sizeof(int) * CIRCLE_BATCH_SIZE);
+    if((mallocErr1 == cudaSuccess) && (mallocErr2 == cudaSuccess) && (mallocErr3 == cudaSuccess))
     {
-        printf("SUCC: malloc has succeeded\n\n\n");
+        printf("***SUC: malloc has succeeded\n\n\n");
     }
     else
     {
-        printf("ERROR: malloc has failed\n\n\n");
+        printf("***ERR: malloc has failed***\n\n\n");
     }
 
     // Initialize parameters in constant memory.  We didn't talk about
@@ -776,8 +796,47 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
+// DBG
+void print_device_data(int *device_data, int size, int num_print)
+{
+    // Prints data on device
+    if(num_print >= size){
+      // Print whole thing
+      int* inarray = new int[size];
+      cudaMemcpy(inarray, device_data, size*sizeof(int), cudaMemcpyDeviceToHost);
+      printf("(dev): ");
+      for(int i = 0; i < size; i++){
+          printf("%d, ", inarray[i]);
+      }
+      printf("\n");
+      delete inarray;
+    }
+    else
+    {
+      // Print first and last data
+      int num_print1 = num_print/2;
+      int num_print2 = num_print - num_print1;
+      int* inarray1 = new int[num_print1];
+      int* inarray2 = new int[num_print2];
+      cudaMemcpy(inarray1, device_data, num_print1*sizeof(int), cudaMemcpyDeviceToHost);
+      cudaMemcpy(inarray2, device_data+size-num_print2, num_print2*sizeof(int), cudaMemcpyDeviceToHost);
+      std::cout << "(device) ";
+      for(int i = 0; i < num_print1; i++){
+          std::cout << inarray1[i] << ", ";
+      }
+      std::cout << "...\n... ";
+      for(int i = 0; i < num_print2; i++){
+          std::cout << inarray2[i] << ", ";
+      }
+      std::cout << "\n";
+      delete inarray1;
+      delete inarray2;
+    }
+}
+
 void
 CudaRenderer::render() {
+    int debug_mat[CIRCLE_BATCH_SIZE]; // DBG
     // Compute circles in batches
     int num_batches = (numberOfCircles+CIRCLE_BATCH_SIZE-1)/CIRCLE_BATCH_SIZE;
     for(int batch_idx = 0; batch_idx < num_batches; batch_idx++)
@@ -791,6 +850,27 @@ CudaRenderer::render() {
         }
         cudaDeviceSynchronize();
         // TODO: Compress array using scan
+        {
+            dim3 blockDim(256, 1);
+            dim3 gridDim((CIRCLE_BATCH_SIZE + blockDim.x - 1) / blockDim.x);
+            for(int bin_idx = 0; bin_idx < SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS; bin_idx++)
+            {
+                thrust::device_ptr<int> scan_start = thrust::device_pointer_cast(cudaCircleImpactsSegment + bin_idx*CIRCLE_BATCH_SIZE);
+                thrust::device_ptr<int> scan_result = thrust::device_pointer_cast(cudaScanResult);
+                thrust::exclusive_scan(scan_start, scan_start + batch_size, scan_result);
+                kernelIndexCompress<<<gridDim, blockDim>>>(cudaCircleImpactsSegment + bin_idx*CIRCLE_BATCH_SIZE, cudaScanResult, cudaRelCircles, batch_size);
+                int CIS_end, scan_end;
+                cudaMemcpy(&CIS_end, cudaCircleImpactsSegment+bin_idx*CIRCLE_BATCH_SIZE+batch_size-1, sizeof(int), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&scan_end, cudaScanResult+batch_size-1, sizeof(int), cudaMemcpyDeviceToHost);
+                int num_rel_circles = CIS_end ? scan_end+1 : scan_end;
+                // DBG
+                printf("CIS_end, scan_end: %d, %d\n", CIS_end, scan_end);
+                print_device_data(cudaCircleImpactsSegment + bin_idx*CIRCLE_BATCH_SIZE, batch_size, batch_size);
+                print_device_data(cudaScanResult, batch_size, batch_size);
+                print_device_data(cudaRelCircles, num_rel_circles, num_rel_circles);
+                printf("\n");
+            }
+        }
         // Render
         {
             int threadsPerBlock = 512;
