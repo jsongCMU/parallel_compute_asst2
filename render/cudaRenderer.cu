@@ -331,15 +331,13 @@ __global__ void kernelAdvanceSnowflake() {
 //
 // Given a pixel and a circle, determine the contribution to the
 // pixel from the circle.  Update of the image is done in this
-// function.  Called by kernelRenderCircles()
+// function.
 __device__ __inline__ void
-shadePixel(float2 pixelCenter, float3 p, float4* imagePtr, int circleIndex) {
+shadePixel(float2 pixelCenter, float rad, float3 p, float3 &A1, float &B1, float &alpha1, int circleIndex) {
 
     float diffX = p.x - pixelCenter.x;
     float diffY = p.y - pixelCenter.y;
     float pixelDist = diffX * diffX + diffY * diffY;
-
-    float rad = cuConstRendererParams.radius[circleIndex];;
     float maxDist = rad * rad;
 
     // Circle does not contribute to the image
@@ -375,23 +373,12 @@ shadePixel(float2 pixelCenter, float3 p, float4* imagePtr, int circleIndex) {
         rgb = *(float3*)&(cuConstRendererParams.color[index3]);
         alpha = .5f;
     }
+    float3 A2 = {alpha * rgb.x, alpha * rgb.y, alpha * rgb.z};
+    float B2 = 1.f - alpha;
 
-    float oneMinusAlpha = 1.f - alpha;
-
-    // BEGIN SHOULD-BE-ATOMIC REGION
-    // global memory read
-
-    float4 existingColor = *imagePtr;
-    float4 newColor;
-    newColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
-    newColor.y = alpha * rgb.y + oneMinusAlpha * existingColor.y;
-    newColor.z = alpha * rgb.z + oneMinusAlpha * existingColor.z;
-    newColor.w = alpha + existingColor.w;
-
-    // Global memory write
-    *imagePtr = newColor;
-
-    // END SHOULD-BE-ATOMIC REGION
+    A1 = {A2.x + A1.x*B2, A2.y + A1.y*B2, A2.z + A1.z*B2};
+    B1 *= B2;
+    alpha1 += alpha;
 }
 
 __global__ void kernelRenderPixel(int N, int* rel_circles_idxs, int* num_rel_circles,  int batch_idx, int batch_size) {
@@ -412,6 +399,9 @@ __global__ void kernelRenderPixel(int N, int* rel_circles_idxs, int* num_rel_cir
         int cur_bin_rel_circles_num = num_rel_circles[seg_y_num*SCREEN_X_SEGMENTS+seg_x_num];
         // Iterate through circles that matter
         float4 color = *(float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+        float3 colorA = {color.x*color.w, color.y*color.w, color.z*color.w};
+        float colorB = (1-color.w);
+        float alpha = color.w;
         for (int i = 0; i < cur_bin_rel_circles_num; i++)
         {
             int global_index = cur_bin_rel_circles[i] + batch_idx * CIRCLE_BATCH_SIZE;
@@ -436,62 +426,14 @@ __global__ void kernelRenderPixel(int N, int* rel_circles_idxs, int* num_rel_cir
             {
                 float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
                                                  invHeight * (static_cast<float>(pixelY) + 0.5f));
-                shadePixel(pixelCenterNorm, p, &color, global_index);
+                shadePixel(pixelCenterNorm, rad, p, colorA, colorB, alpha, global_index);
             }
         }
 
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)] = color.x;
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 1] = color.y;
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 2] = color.z;
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 3] = color.w;
-    }
-}
-
-// kernelRenderCircles -- (CUDA device code)
-//
-// Each thread renders a circle.  Since there is no protection to
-// ensure order of update or mutual exclusion on the output image, the
-// resulting image will be incorrect.
-__global__ void kernelRenderCircles() {
-
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (index >= cuConstRendererParams.numberOfCircles)
-        return;
-
-    int index3 = 3 * index;
-
-    // Read position and radius
-    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-    float  rad = cuConstRendererParams.radius[index];
-
-    // Compute the bounding box of the circle. The bound is in integer
-    // screen coordinates, so it's clamped to the edges of the screen.
-    short imageWidth = cuConstRendererParams.imageWidth;
-    short imageHeight = cuConstRendererParams.imageHeight;
-    short minX = static_cast<short>(imageWidth * (p.x - rad));
-    short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
-    short minY = static_cast<short>(imageHeight * (p.y - rad));
-    short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
-
-    // A bunch of clamps.  Is there a CUDA built-in for this?
-    short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
-    short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
-    short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
-    short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
-
-    float invWidth = 1.f / imageWidth;
-    float invHeight = 1.f / imageHeight;
-
-    // For all pixels in the bounding box
-    for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
-        float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
-        for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
-            float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
-            shadePixel(pixelCenterNorm, p, imgPtr, index);
-            imgPtr++;
-        }
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)] = colorA.x + colorB*color.x;
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 1] = colorA.y + colorB*color.y;
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 2] = colorA.z + colorB*color.z;
+        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 3] = alpha;
     }
 }
 
@@ -875,7 +817,6 @@ CudaRenderer::render() {
         {
             int threadsPerBlock = 512;
             int blocks = (image->width * image->height + threadsPerBlock - 1) / threadsPerBlock;
-            // TODO: Change blending math
             kernelRenderPixel<<<blocks, threadsPerBlock>>>(image->width * image->height, cudaRelCircles, cudaRelCirclesNum, batch_idx, batch_size);
         }
         cudaDeviceSynchronize();
