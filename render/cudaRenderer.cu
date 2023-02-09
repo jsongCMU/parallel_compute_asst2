@@ -25,10 +25,10 @@
 ///////////////////////////////////////////////////////////////////////////////////////
 
 // Divide screen into segments
-#define SCREEN_X_SEGMENTS (10)
+#define SCREEN_X_SEGMENTS (5)
 #define SCREEN_Y_SEGMENTS (SCREEN_X_SEGMENTS)
 // Divide circles into batches
-#define CIRCLE_BATCH_SIZE (1024)
+#define CIRCLE_BATCH_SIZE (8192)
 
 // This stores the global constants
 struct GlobalConstants {
@@ -394,7 +394,7 @@ shadePixel(float2 pixelCenter, float3 p, float4* imagePtr, int circleIndex) {
     // END SHOULD-BE-ATOMIC REGION
 }
 
-__global__ void kernelRenderPixel(int N, int batch_idx, int batch_size) {
+__global__ void kernelRenderPixel(int N, int* rel_circles_idxs, int* num_rel_circles,  int batch_idx, int batch_size) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     short imageWidth = cuConstRendererParams.imageWidth;
     short imageHeight = cuConstRendererParams.imageHeight;
@@ -407,14 +407,14 @@ __global__ void kernelRenderPixel(int N, int batch_idx, int batch_size) {
         // Determine which segment it falls into
         int seg_x_num = pixelX * SCREEN_X_SEGMENTS / imageWidth;
         int seg_y_num = pixelY * SCREEN_Y_SEGMENTS / imageHeight;
+        // Compute bin specific pointers
+        int* cur_bin_rel_circles = rel_circles_idxs + CIRCLE_BATCH_SIZE * (seg_y_num*SCREEN_X_SEGMENTS+seg_x_num);
+        int cur_bin_rel_circles_num = num_rel_circles[seg_y_num*SCREEN_X_SEGMENTS+seg_x_num];
         // Iterate through circles that matter
         float4 color = *(float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
-        for (int i = 0; i < batch_size; i++)
+        for (int i = 0; i < cur_bin_rel_circles_num; i++)
         {
-            if(cuConstRendererParams.circleSegmentMatrix[CIRCLE_BATCH_SIZE*(seg_y_num*SCREEN_X_SEGMENTS+seg_x_num)+i] == 0){
-                continue;
-            }
-            int global_index = i + batch_idx * CIRCLE_BATCH_SIZE;
+            int global_index = cur_bin_rel_circles[i] + batch_idx * CIRCLE_BATCH_SIZE;
             int index3 = 3 * global_index;
 
             // Read position and radius
@@ -870,12 +870,13 @@ CudaRenderer::render() {
                 kernelIndexCompress<<<gridDim, blockDim>>>(cur_circles_in_seg, cudaScanResult, cur_relevant_circles, cur_relevant_circles_num, batch_size);
             }
         }
+        cudaDeviceSynchronize();
         // Render
         {
             int threadsPerBlock = 512;
             int blocks = (image->width * image->height + threadsPerBlock - 1) / threadsPerBlock;
             // TODO: Change blending math
-            kernelRenderPixel<<<blocks, threadsPerBlock>>>(image->width * image->height, batch_idx, batch_size);
+            kernelRenderPixel<<<blocks, threadsPerBlock>>>(image->width * image->height, cudaRelCircles, cudaRelCirclesNum, batch_idx, batch_size);
         }
         cudaDeviceSynchronize();
     }
