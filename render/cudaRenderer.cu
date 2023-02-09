@@ -868,18 +868,6 @@ CudaRenderer::render() {
                 thrust::exclusive_scan(scan_start, scan_start + batch_size, scan_result);
                 // Compress [0,1,1,0,1] -> [1,2,4], 3
                 kernelIndexCompress<<<gridDim, blockDim>>>(cur_circles_in_seg, cudaScanResult, cur_relevant_circles, cur_relevant_circles_num, batch_size);
-                /*
-                // DBG
-                int number_of_idxs;
-                cudaMemcpy(&number_of_idxs, cudaRelCirclesNum+bin_idx, sizeof(int), cudaMemcpyDeviceToHost);
-                printf("Circles in segment: ");
-                print_device_data(cur_circles_in_seg, batch_size, batch_size);
-                printf("Scan: ");
-                print_device_data(cudaScanResult, batch_size, batch_size);
-                printf("Indexes (%d): ", number_of_idxs);
-                print_device_data(cur_relevant_circles, number_of_idxs, number_of_idxs);
-                printf("\n");
-                */
             }
         }
         // Render
