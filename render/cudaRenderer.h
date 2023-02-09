@@ -29,6 +29,7 @@ private:
     int* cudaCircleImpactsSegment;
     int* cudaScanResult;
     int* cudaRelCircles;
+    int* cudaRelCirclesNum;
 
 public:
 
