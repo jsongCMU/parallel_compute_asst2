@@ -333,13 +333,11 @@ __global__ void kernelAdvanceSnowflake() {
 // pixel from the circle.  Update of the image is done in this
 // function.  Called by kernelRenderCircles()
 __device__ __inline__ void
-shadePixel(float2 pixelCenter, float3 p, float4* imagePtr, int circleIndex) {
+shadePixel(float2 pixelCenter, float3 p, float rad, float4* imagePtr, int circleIndex) {
 
     float diffX = p.x - pixelCenter.x;
     float diffY = p.y - pixelCenter.y;
     float pixelDist = diffX * diffX + diffY * diffY;
-
-    float rad = cuConstRendererParams.radius[circleIndex];;
     float maxDist = rad * rad;
 
     // Circle does not contribute to the image
@@ -416,28 +414,14 @@ __global__ void kernelRenderPixel(int N, int* rel_circles_idxs, int* num_rel_cir
         {
             int global_index = cur_bin_rel_circles[i] + batch_idx * CIRCLE_BATCH_SIZE;
             int index3 = 3 * global_index;
-
             // Read position and radius
             float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
             float rad = cuConstRendererParams.radius[global_index];
-
-            // Compute the bounding box of the circle. The bound is in integer
-            // screen coordinates, so it's clamped to the edges of the screen.
-            short minX = static_cast<short>(imageWidth * (p.x - rad));
-            short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
-            short minY = static_cast<short>(imageHeight * (p.y - rad));
-            short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
-
             float invWidth = 1.f / imageWidth;
             float invHeight = 1.f / imageHeight;
-
-            // Check inside bbox
-            if (minX <= pixelX && pixelX <= maxX && minY <= pixelY && pixelY <= maxY)
-            {
-                float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
-                shadePixel(pixelCenterNorm, p, &color, global_index);
-            }
+            float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                                invHeight * (static_cast<float>(pixelY) + 0.5f));
+            shadePixel(pixelCenterNorm, p, rad, &color, global_index);
         }
 
         cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)] = color.x;
@@ -489,7 +473,7 @@ __global__ void kernelRenderCircles() {
         for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
             float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
                                                  invHeight * (static_cast<float>(pixelY) + 0.5f));
-            shadePixel(pixelCenterNorm, p, imgPtr, index);
+            shadePixel(pixelCenterNorm, p, rad, imgPtr, index);
             imgPtr++;
         }
     }
