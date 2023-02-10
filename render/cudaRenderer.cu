@@ -25,7 +25,7 @@
 ///////////////////////////////////////////////////////////////////////////////////////
 
 // Divide screen into segments
-#define SCREEN_X_SEGMENTS (5)
+#define SCREEN_X_SEGMENTS (10)
 #define SCREEN_Y_SEGMENTS (SCREEN_X_SEGMENTS)
 // Divide circles into batches
 #define CIRCLE_BATCH_SIZE (8192)
@@ -549,14 +549,22 @@ __global__ void kernelCircleInSegment(int batch_idx, int batch_size) {
 }
 
 // Given CircleSegmentMatrix and scan, compress into cudaRelCircles
-__global__ void kernelIndexCompress(int* circles_in_seg, int* scan_res, int* relevant_circles, int* relevant_circles_num, int batch_size) {
+__global__ void kernelIndexCompress(int* flags, int* scan, int* relevant_circles, int* relevant_circles_num, int batch_size) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= batch_size)
+    // Determine segment
+    int seg_idx = index / CIRCLE_BATCH_SIZE;
+    int seg_start = seg_idx * CIRCLE_BATCH_SIZE;
+    if (index >= seg_start + batch_size)
         return;
-    else if(index == batch_size-1)
-        *relevant_circles_num = circles_in_seg[index] ? scan_res[index]+1 : scan_res[index];
-    if(circles_in_seg[index]){
-        relevant_circles[scan_res[index]] = index;
+    // Determine value
+    int cur_val = scan[index] - scan[seg_start];
+    if(index == seg_start + batch_size-1)
+    {
+        // Contains last scan, which gives size
+        relevant_circles_num[seg_idx] = flags[index] ? cur_val+1 : cur_val;
+    }
+    if(flags[index]){
+        relevant_circles[seg_start + cur_val] = index - seg_start;
     }
     
 }
@@ -686,7 +694,7 @@ CudaRenderer::setup() {
 
     cudaError_t mallocErr1 = cudaMalloc(&cudaCircleImpactsSegment, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE);
     printf("numCircles: %d\n", numberOfCircles);
-    cudaError_t mallocErr2 = cudaMalloc(&cudaScanResult, sizeof(int) * CIRCLE_BATCH_SIZE);
+    cudaError_t mallocErr2 = cudaMalloc(&cudaScanResult, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE);
     cudaError_t mallocErr3 = cudaMalloc(&cudaRelCircles, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE);
     cudaError_t mallocErr4 = cudaMalloc(&cudaRelCirclesNum, sizeof(int) * SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS);
     if((mallocErr1 == cudaSuccess) && (mallocErr2 == cudaSuccess) && (mallocErr3 == cudaSuccess) && (mallocErr4 == cudaSuccess))
@@ -856,19 +864,13 @@ CudaRenderer::render() {
         // Compress vector of flags to vector of idxs using scan
         {
             dim3 blockDim(256, 1);
-            dim3 gridDim((CIRCLE_BATCH_SIZE + blockDim.x - 1) / blockDim.x);
-            for(int bin_idx = 0; bin_idx < SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS; bin_idx++)
-            {
-                // Do scan [0,1,1,0,1] -> [0,0,1,2,2]
-                int* cur_circles_in_seg = cudaCircleImpactsSegment + bin_idx*CIRCLE_BATCH_SIZE;
-                int* cur_relevant_circles = cudaRelCircles + bin_idx*CIRCLE_BATCH_SIZE;
-                int* cur_relevant_circles_num = cudaRelCirclesNum + bin_idx;
-                thrust::device_ptr<int> scan_start = thrust::device_pointer_cast(cur_circles_in_seg);
-                thrust::device_ptr<int> scan_result = thrust::device_pointer_cast(cudaScanResult);
-                thrust::exclusive_scan(scan_start, scan_start + batch_size, scan_result);
-                // Compress [0,1,1,0,1] -> [1,2,4], 3
-                kernelIndexCompress<<<gridDim, blockDim>>>(cur_circles_in_seg, cudaScanResult, cur_relevant_circles, cur_relevant_circles_num, batch_size);
-            }
+            dim3 gridDim((SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE + blockDim.x - 1) / blockDim.x);
+            // Do scan [0,1,1,0,1] -> [0,0,1,2,2]
+            thrust::device_ptr<int> scan_start = thrust::device_pointer_cast(cudaCircleImpactsSegment);
+            thrust::device_ptr<int> scan_result = thrust::device_pointer_cast(cudaScanResult);
+            thrust::exclusive_scan(scan_start, scan_start + SCREEN_X_SEGMENTS * SCREEN_Y_SEGMENTS * CIRCLE_BATCH_SIZE, scan_result);
+            // Compress [0,1,1,0,1] -> [1,2,4], 3
+            kernelIndexCompress<<<gridDim, blockDim>>>(cudaCircleImpactsSegment, cudaScanResult, cudaRelCircles, cudaRelCirclesNum, batch_size);
         }
         cudaDeviceSynchronize();
         // Render
