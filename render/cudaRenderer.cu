@@ -333,7 +333,7 @@ __global__ void kernelAdvanceSnowflake() {
 // pixel from the circle.  Update of the image is done in this
 // function.  Called by kernelRenderCircles()
 __device__ __inline__ void
-shadePixel(float2 pixelCenter, float3 p, float rad, float4* imagePtr, int circleIndex) {
+shadePixel(float2 pixelCenter, float3 p, float rad, float3 &A1, float &B1, float &alpha1, int circleIndex) {
 
     float diffX = p.x - pixelCenter.x;
     float diffY = p.y - pixelCenter.y;
@@ -373,46 +373,40 @@ shadePixel(float2 pixelCenter, float3 p, float rad, float4* imagePtr, int circle
         rgb = *(float3*)&(cuConstRendererParams.color[index3]);
         alpha = .5f;
     }
+    float3 A2 = {alpha * rgb.x, alpha * rgb.y, alpha * rgb.z};
+    float B2 = 1.f - alpha;
 
-    float oneMinusAlpha = 1.f - alpha;
-
-    // BEGIN SHOULD-BE-ATOMIC REGION
-    // global memory read
-
-    float4 existingColor = *imagePtr;
-    float4 newColor;
-    newColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
-    newColor.y = alpha * rgb.y + oneMinusAlpha * existingColor.y;
-    newColor.z = alpha * rgb.z + oneMinusAlpha * existingColor.z;
-    newColor.w = alpha + existingColor.w;
-
-    // Global memory write
-    *imagePtr = newColor;
-
-    // END SHOULD-BE-ATOMIC REGION
+    A1 = {A2.x + A1.x*B2, A2.y + A1.y*B2, A2.z + A1.z*B2};
+    B1 *= B2;
+    alpha1 += alpha;
 }
 
-__global__ void kernelRenderPixel(int N, int* rel_circles_idxs, int* num_rel_circles,  int batch_idx, int batch_size) {
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void kernelRenderPixel(int* rel_circles_idxs, int* num_rel_circles,  int batch_idx, int batch_size) {
     short imageWidth = cuConstRendererParams.imageWidth;
     short imageHeight = cuConstRendererParams.imageHeight;
-
-    if (index < N)
+    // Compute coordinate of pixel
+    int pixelX = blockIdx.x % imageHeight;
+    int pixelY = blockIdx.x / imageWidth;
+    // Determine which segment it falls into
+    int seg_x_num = pixelX * SCREEN_X_SEGMENTS / imageWidth;
+    int seg_y_num = pixelY * SCREEN_Y_SEGMENTS / imageHeight;
+    // Compute seg specific pointers
+    int* cur_seg_rel_circles = rel_circles_idxs + CIRCLE_BATCH_SIZE * (seg_y_num*SCREEN_X_SEGMENTS+seg_x_num);
+    int cur_seg_rel_circles_num = num_rel_circles[seg_y_num*SCREEN_X_SEGMENTS+seg_x_num];
+    // Iterate through circles that matter in parallel
+    float4 color = *(float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+    float3 colorA1 = {0,0,0};
+    float colorB1 = 1;
+    float3 colorA2 = colorA1;
+    float colorB2 = colorB1;
+    float alpha1 = color.w;
+    float alpha2 = alpha1;
+    if(threadIdx.x % 2)
     {
-        // Compute coordinate of pixel
-        int pixelX = index % imageHeight;
-        int pixelY = floorf(index / imageWidth);
-        // Determine which segment it falls into
-        int seg_x_num = pixelX * SCREEN_X_SEGMENTS / imageWidth;
-        int seg_y_num = pixelY * SCREEN_Y_SEGMENTS / imageHeight;
-        // Compute bin specific pointers
-        int* cur_bin_rel_circles = rel_circles_idxs + CIRCLE_BATCH_SIZE * (seg_y_num*SCREEN_X_SEGMENTS+seg_x_num);
-        int cur_bin_rel_circles_num = num_rel_circles[seg_y_num*SCREEN_X_SEGMENTS+seg_x_num];
-        // Iterate through circles that matter
-        float4 color = *(float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
-        for (int i = 0; i < cur_bin_rel_circles_num; i++)
+        int cur_size = cur_seg_rel_circles_num/2;
+        for (int i = 0; i < cur_size; i++)
         {
-            int global_index = cur_bin_rel_circles[i] + batch_idx * CIRCLE_BATCH_SIZE;
+            int global_index = cur_seg_rel_circles[i] + batch_idx * CIRCLE_BATCH_SIZE;
             int index3 = 3 * global_index;
             // Read position and radius
             float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
@@ -421,62 +415,34 @@ __global__ void kernelRenderPixel(int N, int* rel_circles_idxs, int* num_rel_cir
             float invHeight = 1.f / imageHeight;
             float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
-            shadePixel(pixelCenterNorm, p, rad, &color, global_index);
+            shadePixel(pixelCenterNorm, p, rad, colorA1, colorB1, alpha1, global_index);
         }
-
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)] = color.x;
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 1] = color.y;
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 2] = color.z;
-        cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 3] = color.w;
     }
-}
-
-// kernelRenderCircles -- (CUDA device code)
-//
-// Each thread renders a circle.  Since there is no protection to
-// ensure order of update or mutual exclusion on the output image, the
-// resulting image will be incorrect.
-__global__ void kernelRenderCircles() {
-
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (index >= cuConstRendererParams.numberOfCircles)
-        return;
-
-    int index3 = 3 * index;
-
-    // Read position and radius
-    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-    float  rad = cuConstRendererParams.radius[index];
-
-    // Compute the bounding box of the circle. The bound is in integer
-    // screen coordinates, so it's clamped to the edges of the screen.
-    short imageWidth = cuConstRendererParams.imageWidth;
-    short imageHeight = cuConstRendererParams.imageHeight;
-    short minX = static_cast<short>(imageWidth * (p.x - rad));
-    short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
-    short minY = static_cast<short>(imageHeight * (p.y - rad));
-    short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
-
-    // A bunch of clamps.  Is there a CUDA built-in for this?
-    short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
-    short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
-    short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
-    short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
-
-    float invWidth = 1.f / imageWidth;
-    float invHeight = 1.f / imageHeight;
-
-    // For all pixels in the bounding box
-    for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
-        float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
-        for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
+    else
+    {
+        int cur_size = cur_seg_rel_circles_num-cur_seg_rel_circles_num/2;
+        for (int i = cur_seg_rel_circles_num-cur_size; i < cur_seg_rel_circles_num; i++)
+        {
+            int global_index = cur_seg_rel_circles[i] + batch_idx * CIRCLE_BATCH_SIZE;
+            int index3 = 3 * global_index;
+            // Read position and radius
+            float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+            float rad = cuConstRendererParams.radius[global_index];
+            float invWidth = 1.f / imageWidth;
+            float invHeight = 1.f / imageHeight;
             float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
-            shadePixel(pixelCenterNorm, p, rad, imgPtr, index);
-            imgPtr++;
+                                                invHeight * (static_cast<float>(pixelY) + 0.5f));
+            shadePixel(pixelCenterNorm, p, rad, colorA2, colorB2, alpha2, global_index);
         }
     }
+    __syncthreads();
+    // Compute color
+    colorA1 = {colorA2.x + colorA1.x*colorB2, colorA2.y + colorA1.y*colorB2, colorA2.z + colorA1.z*colorB2};
+    colorB1 *= colorB2;
+    cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)] = colorA1.x + colorB1*color.x;
+    cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 1] = colorA1.y + colorB1*color.y;
+    cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 2] = colorA1.z + colorB1*color.z;
+    cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX) + 3] = alpha1+alpha2;
 }
 
 __device__ __inline__ int
@@ -859,10 +825,9 @@ CudaRenderer::render() {
         cudaDeviceSynchronize();
         // Render
         {
-            int threadsPerBlock = 512;
-            int blocks = (image->width * image->height + threadsPerBlock - 1) / threadsPerBlock;
-            // TODO: Change blending math
-            kernelRenderPixel<<<blocks, threadsPerBlock>>>(image->width * image->height, cudaRelCircles, cudaRelCirclesNum, batch_idx, batch_size);
+            int threadsPerBlock = 2;
+            int blocks = image->width * image->height;
+            kernelRenderPixel<<<blocks, threadsPerBlock>>>(cudaRelCircles, cudaRelCirclesNum, batch_idx, batch_size);
         }
         cudaDeviceSynchronize();
     }
