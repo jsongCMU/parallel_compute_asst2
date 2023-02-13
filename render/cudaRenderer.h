@@ -16,6 +16,7 @@ private:
     SceneName sceneName;
 
     int numberOfCircles;
+    int binDim;
     float* position;
     float* velocity;
     float* color;
@@ -26,10 +27,11 @@ private:
     float* cudaDeviceColor;
     float* cudaDeviceRadius;
     float* cudaDeviceImageData;
-    int* cudaCircleImpactsSegment;
-    int* cudaScanResult;
-    int* cudaRelCircles;
-    int* cudaRelCirclesNum;
+    
+    int* imageBins;
+    int* scanArr;
+    int* indexArr;
+
 
 public:
 
