@@ -449,12 +449,13 @@ __global__ void binCircles(int *imageBins, int binDim)
     float rad = cuConstRendererParams.radius[index];
 
     float inv_bin = 1.0f / binDim;
-
+    float x_padding = 0.5/cuConstRendererParams.imageWidth;
+    float y_padding = 0.5/cuConstRendererParams.imageHeight;
     // For all bin regions, check if circle is inside
     for (int i = 0; i < binDim; i++)
     {
         float boxL = i * inv_bin;
-        float boxR = (i + 1) * inv_bin - 1e-12;
+        float boxR = (i + 1) * inv_bin + x_padding - 1e-12;
 
         if (i == binDim - 1)
             boxR = 1.0f;
@@ -462,7 +463,7 @@ __global__ void binCircles(int *imageBins, int binDim)
         for (int j = 0; j < binDim; j++)
         {
             float boxB = j * inv_bin;
-            float boxT = (j + 1) * inv_bin - 1e-12;
+            float boxT = (j + 1) * inv_bin + y_padding - 1e-12;
 
             if (j == binDim - 1)
                 boxT = 1.0f;
