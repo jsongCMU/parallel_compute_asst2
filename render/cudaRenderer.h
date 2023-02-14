@@ -15,6 +15,8 @@ private:
     Image* image;
     SceneName sceneName;
 
+    bool computed_once;
+    bool compute_all;
     int numberOfCircles;
     int binDim;
     float* position;

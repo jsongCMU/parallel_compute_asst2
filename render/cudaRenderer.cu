@@ -629,6 +629,17 @@ void CudaRenderer::loadScene(SceneName scene)
 void CudaRenderer::setup()
 {
 
+    computed_once = false;
+    compute_all =
+        sceneName==CIRCLE_RGB ||
+        sceneName==CIRCLE_RGBY ||
+        sceneName==CIRCLE_TEST_10K ||
+        sceneName==CIRCLE_TEST_100K ||
+        sceneName==PATTERN ||
+        sceneName==SNOWFLAKES_SINGLE_FRAME ||
+        sceneName==BIG_LITTLE ||
+        sceneName==LITTLE_BIG;
+    compute_all = !compute_all;
     int deviceCount = 0;
     bool isFastGPU = false;
     std::string name;
@@ -807,20 +818,24 @@ void CudaRenderer::advanceAnimation()
 
 void CudaRenderer::render()
 {
-    // 256 threads per block is a healthy number
-    int threadsPerBlock = 256;
-    int blocks = (numberOfCircles + threadsPerBlock - 1) / threadsPerBlock;
+    if(!(computed_once==true && compute_all==false))
+    {
+        // 256 threads per block is a healthy number
+        int threadsPerBlock = 256;
+        int blocks = (numberOfCircles + threadsPerBlock - 1) / threadsPerBlock;
 
-    binCircles<<<blocks, threadsPerBlock>>>(imageBins, binDim);
-    cudaCheckError(cudaDeviceSynchronize());
-    thrust::device_ptr<int> start = thrust::device_pointer_cast(imageBins);
-    thrust::device_ptr<int> result = thrust::device_pointer_cast(scanArr);
+        binCircles<<<blocks, threadsPerBlock>>>(imageBins, binDim);
+        cudaCheckError(cudaDeviceSynchronize());
+        thrust::device_ptr<int> start = thrust::device_pointer_cast(imageBins);
+        thrust::device_ptr<int> result = thrust::device_pointer_cast(scanArr);
 
-    blocks = (binDim * binDim * numberOfCircles + threadsPerBlock - 1) / threadsPerBlock;
-    thrust::inclusive_scan(start, start + binDim * binDim * numberOfCircles, result);
-    cudaCheckError(cudaDeviceSynchronize());
-    getCircleIndexes<<<blocks, threadsPerBlock>>>(scanArr, indexArr, binDim);
-    cudaCheckError(cudaDeviceSynchronize());
+        blocks = (binDim * binDim * numberOfCircles + threadsPerBlock - 1) / threadsPerBlock;
+        thrust::inclusive_scan(start, start + binDim * binDim * numberOfCircles, result);
+        cudaCheckError(cudaDeviceSynchronize());
+        getCircleIndexes<<<blocks, threadsPerBlock>>>(scanArr, indexArr, binDim);
+        cudaCheckError(cudaDeviceSynchronize());
+        computed_once = true;
+    }
 
     // int test[numberOfCircles];
     // cudaMemcpy(test, indexArr + 1 * numberOfCircles, numberOfCircles * sizeof(int),
